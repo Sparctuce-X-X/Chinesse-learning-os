@@ -1,0 +1,637 @@
+// Chinese Learning OS — modèle de données
+// SQLite en local ; le schéma reste compatible PostgreSQL (changer `provider`).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Énumérations ────────────────────────────────────────────────────────────
+
+enum SourceType {
+  TEACHER
+  AI
+  USER
+  // Ressource externe (article, vidéo, document) ou dictionnaire : ni la professeure, ni l'IA.
+  EXTERNAL
+}
+
+enum LessonKind {
+  // Cours avec la professeure (PDF).
+  COURSE
+  // Ressource externe importée par l'utilisateur (texte, article, document…).
+  RESOURCE
+}
+
+enum ResourceKind {
+  TEXT
+  ARTICLE
+  DOCUMENT
+  VIDEO
+}
+
+enum KnowledgeType {
+  VOCABULARY
+  EXPRESSION
+  SENTENCE
+  GRAMMAR
+}
+
+enum KnowledgeStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum Confidence {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum LessonStatus {
+  UPLOADED
+  EXTRACTING
+  ANALYZING
+  READY_FOR_REVIEW
+  VALIDATED
+  FAILED
+}
+
+enum DocumentStatus {
+  PENDING
+  EXTRACTED
+  FAILED
+}
+
+enum ExtractionMethod {
+  AI
+  HEURISTIC
+  MANUAL
+}
+
+enum ExerciseType {
+  RECOGNITION
+  PRODUCTION
+  PINYIN
+  LISTENING
+  LISTENING_MEANING
+  FILL_BLANK
+  SENTENCE_RECONSTRUCTION
+  TRANSLATION
+  GRAMMAR
+  SPEAKING
+  TONE
+}
+
+enum SkillDimension {
+  RECOGNITION
+  PRODUCTION
+  LISTENING
+  PRONUNCIATION
+  USAGE
+}
+
+enum AttemptResult {
+  CORRECT
+  MOSTLY_CORRECT
+  INCORRECT
+  SKIPPED
+}
+
+enum EvaluationMethod {
+  EXACT
+  FUZZY
+  SELF
+  AI
+}
+
+enum MistakeCategory {
+  MEANING
+  CHARACTER
+  PINYIN
+  TONE
+  PRONUNCIATION
+  GRAMMAR
+  WORD_ORDER
+  CLASSIFIER
+  LISTENING
+  USAGE
+  OTHER
+}
+
+enum SessionKind {
+  DAILY
+  MISTAKES
+  PREPARATION
+  LESSON
+  KNOWLEDGE
+}
+
+enum ConversationRole {
+  USER
+  ASSISTANT
+}
+
+enum InputMode {
+  TEXT
+  VOICE
+}
+
+// ─── Entités ─────────────────────────────────────────────────────────────────
+
+model User {
+  id                  String   @id @default(cuid())
+  name                String   @default("Moi")
+  dailyGoalMinutes    Int      @default(12)
+  newItemsPerSession  Int      @default(8)
+  // Plafond de nouvelles notions par jour (toutes sessions confondues) : protège la charge des jours suivants.
+  newItemsPerDay      Int      @default(10)
+  maxReviewsPerSession Int     @default(30)
+  // Voix de synthèse choisie (identifiant du fournisseur actif, ex. « zh-CN-XiaoxiaoNeural »).
+  ttsVoice            String   @default("zh-CN-XiaoxiaoNeural")
+  // Niveau HSK estimé (0 = débutant) : les mots de ce niveau ou en dessous sont supposés connus
+  // dans les ressources externes (sauf indication contraire).
+  hskLevel            Int      @default(2)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  lessons         Lesson[]
+  knowledgeItems  KnowledgeItem[]
+  sessions        LearningSession[]
+  attempts        ReviewAttempt[]
+  mistakes        Mistake[]
+  speaking        SpeakingAttempt[]
+  conversations   Conversation[]
+  themes          Theme[]
+  resources       Resource[]
+  knownWords      KnownWord[]
+}
+
+model Lesson {
+  id               String           @id @default(cuid())
+  userId           String
+  kind             LessonKind       @default(COURSE)
+  title            String
+  titleChinese     String?
+  date             DateTime
+  notes            String?
+  topics           Json             
+  processingStatus LessonStatus     @default(UPLOADED)
+  extractionMethod ExtractionMethod?
+  // Brouillon d'extraction (LessonExtraction validé par Zod) en attente de validation.
+  draft            Json?
+  analysisError    String?
+  analysisWarnings Json             
+  validatedAt      DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documents   SourceDocument[]
+  knowledge   LessonKnowledge[]
+  corrections TeacherCorrection[]
+  exercises   Exercise[]
+  examples    Example[]
+  resource    Resource?
+
+  @@index([userId, date])
+  @@index([processingStatus])
+}
+
+model SourceDocument {
+  id               String         @id @default(cuid())
+  lessonId         String
+  filename         String
+  mimeType         String
+  sizeBytes        Int
+  sha256           String
+  storagePath      String
+  pageCount        Int            @default(0)
+  extractedText    String?
+  imagePages       Json           
+  pdfCreatedAt     DateTime?
+  processingStatus DocumentStatus @default(PENDING)
+  errorMessage     String?
+  createdAt        DateTime       @default(now())
+
+  lesson Lesson       @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  pages  SourcePage[]
+
+  @@index([lessonId])
+  @@index([sha256])
+}
+
+model SourcePage {
+  id         String  @id @default(cuid())
+  documentId String
+  pageNumber Int
+  text       String
+  charCount  Int
+  likelyImage Boolean @default(false)
+
+  document SourceDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, pageNumber])
+}
+
+model KnowledgeItem {
+  id           String          @id @default(cuid())
+  userId       String
+  type         KnowledgeType
+  sourceType   SourceType
+  status       KnowledgeStatus @default(ACTIVE)
+  // Clé normalisée utilisée pour la déduplication (ex. "VOCABULARY:旅行").
+  canonicalKey String
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vocabulary   Vocabulary?
+  grammarPoint GrammarPoint?
+  sentence     Sentence?
+  lessons      LessonKnowledge[]
+  examples     Example[]
+  reviewState  ReviewState?
+  attempts     ReviewAttempt[]
+  mistakes     Mistake[]
+  exercises    Exercise[]
+  corrections  TeacherCorrection[]
+  speaking     SpeakingAttempt[]
+  themes       KnowledgeTheme[]
+  // Date du dernier rangement par thème (null = à ranger).
+  themesClassifiedAt DateTime?
+
+  @@index([userId, type])
+  @@index([userId, canonicalKey])
+}
+
+model Vocabulary {
+  knowledgeItemId String     @id
+  hanzi           String
+  pinyin          String?
+  pinyinSource    SourceType?
+  french          String?
+  frenchSource    SourceType?
+  english         String?
+  englishSource   SourceType?
+  partOfSpeech    String?
+  notes           String?
+
+  knowledgeItem KnowledgeItem @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+
+  @@index([hanzi])
+}
+
+model GrammarPoint {
+  knowledgeItemId   String      @id
+  name              String
+  structure         String?
+  explanation       String?
+  explanationSource SourceType?
+  french            String?
+  frenchSource      SourceType?
+  notes             String?
+
+  knowledgeItem KnowledgeItem @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+}
+
+model Sentence {
+  knowledgeItemId String      @id
+  hanzi           String
+  pinyin          String?
+  pinyinSource    SourceType?
+  french          String?
+  frenchSource    SourceType?
+  english         String?
+  englishSource   SourceType?
+  notes           String?
+
+  knowledgeItem KnowledgeItem @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+
+  @@index([hanzi])
+}
+
+model LessonKnowledge {
+  id              String     @id @default(cuid())
+  lessonId        String
+  knowledgeItemId String
+  sourcePage      Int?
+  sourceText      String?
+  confidence      Confidence @default(MEDIUM)
+  highlighted     Boolean    @default(false)
+  createdAt       DateTime   @default(now())
+
+  lesson        Lesson        @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  knowledgeItem KnowledgeItem @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+
+  @@unique([lessonId, knowledgeItemId])
+  @@index([knowledgeItemId])
+}
+
+model Example {
+  id              String     @id @default(cuid())
+  knowledgeItemId String
+  lessonId        String?
+  hanzi           String
+  pinyin          String?
+  french          String?
+  english         String?
+  /** Provenance du texte chinois. */
+  sourceType      SourceType
+  /** Provenance de la traduction (souvent AI même si la phrase vient de la professeure). */
+  translationSource SourceType?
+  sourcePage      Int?
+  createdAt       DateTime   @default(now())
+
+  knowledgeItem KnowledgeItem @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+  lesson        Lesson?       @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+
+  @@index([knowledgeItemId])
+}
+
+model TeacherCorrection {
+  id              String     @id @default(cuid())
+  lessonId        String
+  knowledgeItemId String?
+  incorrect       String
+  correct         String
+  explanation     String?
+  context         String?
+  sourcePage      Int?
+  sourceType      SourceType @default(TEACHER)
+  createdAt       DateTime   @default(now())
+
+  lesson        Lesson         @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  knowledgeItem KnowledgeItem? @relation(fields: [knowledgeItemId], references: [id], onDelete: SetNull)
+
+  @@index([lessonId])
+}
+
+model Exercise {
+  id              String       @id @default(cuid())
+  lessonId        String?
+  knowledgeItemId String?
+  type            ExerciseType
+  prompt          String
+  expectedAnswer  String?
+  metadata        Json         
+  sourceType      SourceType
+  sourcePage      Int?
+  createdAt       DateTime     @default(now())
+
+  lesson        Lesson?        @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  knowledgeItem KnowledgeItem? @relation(fields: [knowledgeItemId], references: [id], onDelete: SetNull)
+
+  @@index([lessonId])
+}
+
+model ReviewState {
+  id              String   @id @default(cuid())
+  knowledgeItemId String   @unique
+
+  // Planification (voir docs/SPACED_REPETITION.md)
+  intervalDays    Float    @default(0)
+  ease            Float    @default(2.3)
+  reps            Int      @default(0)
+  lapses          Int      @default(0)
+  streak          Int      @default(0)
+  lastReviewAt    DateTime?
+  nextReviewAt    DateTime?
+
+  // Maîtrise multidimensionnelle (0–100), recalculable depuis ReviewAttempt.
+  recognitionScore   Float @default(0)
+  productionScore    Float @default(0)
+  listeningScore     Float @default(0)
+  pronunciationScore Float @default(0)
+  usageScore         Float @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  knowledgeItem KnowledgeItem @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+
+  @@index([nextReviewAt])
+}
+
+model LearningSession {
+  id               String      @id @default(cuid())
+  userId           String
+  kind             SessionKind @default(DAILY)
+  // Plan figé à la création : liste ordonnée des exercices (JSON validé par Zod).
+  plan             Json        
+  currentIndex     Int         @default(0)
+  startedAt        DateTime    @default(now())
+  completedAt      DateTime?
+  durationSeconds  Int         @default(0)
+  reviewsCompleted Int         @default(0)
+  correctCount     Int         @default(0)
+  mistakesCount    Int         @default(0)
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  attempts ReviewAttempt[]
+  speaking SpeakingAttempt[]
+
+  @@index([userId, startedAt])
+}
+
+model ReviewAttempt {
+  id               String           @id @default(cuid())
+  userId           String
+  knowledgeItemId  String
+  sessionId        String?
+  mistakeId        String?
+  exerciseType     ExerciseType
+  dimension        SkillDimension
+  prompt           String
+  userAnswer       String
+  expectedAnswer   String
+  result           AttemptResult
+  evaluationMethod EvaluationMethod
+  feedback         String?
+  responseTimeMs   Int?
+  createdAt        DateTime         @default(now())
+
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  knowledgeItem KnowledgeItem    @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+  session       LearningSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  mistake       Mistake?         @relation(fields: [mistakeId], references: [id], onDelete: SetNull)
+
+  @@index([knowledgeItemId, createdAt])
+  @@index([userId, createdAt])
+  @@index([sessionId])
+}
+
+model Mistake {
+  id              String          @id @default(cuid())
+  userId          String
+  knowledgeItemId String
+  category        MistakeCategory
+  exerciseType    ExerciseType
+  prompt          String
+  userAnswer      String
+  expectedAnswer  String
+  explanation     String?
+  occurrences     Int             @default(1)
+  firstSeenAt     DateTime        @default(now())
+  lastSeenAt      DateTime        @default(now())
+  resolvedAt      DateTime?
+  reopenedCount   Int             @default(0)
+
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  knowledgeItem KnowledgeItem   @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+  attempts      ReviewAttempt[]
+
+  @@unique([knowledgeItemId, category])
+  @@index([userId, resolvedAt])
+}
+
+model SpeakingAttempt {
+  id              String         @id @default(cuid())
+  userId          String
+  knowledgeItemId String?
+  sessionId       String?
+  conversationId  String?
+  prompt          String
+  targets         Json           
+  audioPath       String?
+  transcription   String
+  inputMode       InputMode      @default(VOICE)
+  result          AttemptResult?
+  feedback        Json?
+  durationSeconds Int?
+  createdAt       DateTime       @default(now())
+
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  knowledgeItem KnowledgeItem?   @relation(fields: [knowledgeItemId], references: [id], onDelete: SetNull)
+  session       LearningSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  conversation  Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+}
+
+model Conversation {
+  id          String    @id @default(cuid())
+  userId      String
+  scenario    String
+  title       String
+  setup       Json      
+  targets     Json      
+  summary     Json?
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  turns    ConversationTurn[]
+  speaking SpeakingAttempt[]
+
+  @@index([userId, createdAt])
+}
+
+model ConversationTurn {
+  id             String           @id @default(cuid())
+  conversationId String
+  role           ConversationRole
+  hanzi          String
+  pinyin         String?
+  french         String?
+  inputMode      InputMode        @default(TEXT)
+  feedback       Json?
+  createdAt      DateTime         @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+// Cache des résultats IA stables (traductions, explications, évaluations identiques).
+model AICache {
+  key       String   @id
+  kind      String
+  value     Json
+  createdAt DateTime @default(now())
+}
+
+// ─── Thèmes ───────────────────────────────────────────────────────────────────
+// Regroupement transversal des connaissances par sujet (argent, cuisine, informatique…),
+// indépendant des cours. Alimenté automatiquement par l'IA à chaque cours validé ;
+// l'utilisateur peut renommer, fusionner, supprimer et corriger les rattachements.
+
+model Theme {
+  id          String     @id @default(cuid())
+  userId      String
+  name        String
+  emoji       String?
+  description String?
+  // AI = créé par le rangement automatique ; USER = créé ou renommé par l'utilisateur.
+  source      SourceType @default(AI)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  user  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items KnowledgeTheme[]
+
+  @@unique([userId, name])
+}
+
+model KnowledgeTheme {
+  knowledgeItemId String
+  themeId         String
+  // AI = proposé par le rangement automatique ; USER = ajouté par l'utilisateur.
+  source          SourceType @default(AI)
+  createdAt       DateTime   @default(now())
+
+  knowledgeItem KnowledgeItem @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+  theme         Theme         @relation(fields: [themeId], references: [id], onDelete: Cascade)
+
+  @@id([knowledgeItemId, themeId])
+  @@index([themeId])
+}
+
+// ─── Ressources externes ──────────────────────────────────────────────────────
+// Texte, article, document ou vidéo importé par l'utilisateur. Chaque ressource a un Lesson
+// (kind RESOURCE) qui porte le brouillon, la validation et les liens vers les connaissances.
+
+/// Origine du texte d'une vidéo : sous-titres de l'auteur, sous-titres automatiques de YouTube, transcription Whisper locale.
+enum TranscriptSource {
+  CAPTIONS
+  AUTO_CAPTIONS
+  WHISPER
+}
+
+model Resource {
+  id        String       @id @default(cuid())
+  userId    String
+  lessonId  String       @unique
+  kind      ResourceKind
+  url       String?
+  siteName  String?
+  filename  String?
+  // Texte de la ressource (converti en chinois simplifié si nécessaire).
+  text      String
+  convertedFromTraditional Boolean @default(false)
+  // Vidéo : identifiant YouTube, durée, répliques horodatées [{ s, e, t }] et origine de la transcription.
+  mediaId          String?
+  durationSec      Int?
+  segments         Json?
+  transcriptSource TranscriptSource?
+  createdAt DateTime     @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// Mots que l'utilisateur déclare déjà connaître (jamais proposés dans les ressources).
+model KnownWord {
+  userId    String
+  hanzi     String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, hanzi])
+}
